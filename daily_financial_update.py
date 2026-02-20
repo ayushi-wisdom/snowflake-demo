@@ -312,15 +312,71 @@ def daily_update():
         # Transactions
         logger.info("-" * 60)
         logger.info("Step 1: Generating transactions...")
-        transaction_count = random.randint(10000, 20000)
-        logger.info(f"Generating {transaction_count} transactions...")
+        # More realistic: 500-1,500 transactions per day (~0.2-0.5 per account on average)
+        transaction_count = random.randint(500, 1500)
+        logger.info(f"Generating {transaction_count} transactions for today...")
         transactions = generate_transactions(
             accounts if accounts_exist else [],
             transactions_per_day=transaction_count,
             target_date=target_date
         )
-        logger.info(f"Generated {len(transactions)} transactions")
+        logger.info(f"Generated {len(transactions)} transactions for today")
         insert_transactions(cursor, transactions)
+        
+        # Generate historical transactions (last 365 days / 1 year) if needed
+        cursor.execute("SELECT COUNT(*) FROM transactions")
+        existing_transaction_count = cursor.fetchone()[0]
+        
+        # Check if we have a full year of data
+        cursor.execute("SELECT COUNT(DISTINCT transaction_date) FROM transactions")
+        distinct_dates = cursor.fetchone()[0]
+        
+        # Check which dates we already have
+        cursor.execute("SELECT DISTINCT transaction_date FROM transactions ORDER BY transaction_date")
+        existing_dates = {row[0] for row in cursor.fetchall()}
+        
+        # Generate historical if we have less than 365 days of data
+        if distinct_dates < 365:
+            logger.info(f"Found {existing_transaction_count} transactions across {distinct_dates} days. Generating historical transactions for full year (365 days)...")
+            
+            historical_transactions = []
+            total_days = 365
+            
+            # Process in batches to avoid memory issues
+            batch_size = 30  # Process 30 days at a time
+            for batch_start in range(1, total_days + 1, batch_size):
+                batch_end = min(batch_start + batch_size, total_days + 1)
+                batch_days = batch_end - batch_start
+                
+                batch_transactions = []
+                batch_dates_to_generate = []
+                
+                for days_ago in range(batch_start, batch_end):
+                    hist_date = target_date - timedelta(days=days_ago)
+                    # Only generate if we don't already have data for this date
+                    if hist_date not in existing_dates:
+                        batch_dates_to_generate.append(hist_date)
+                        hist_count = random.randint(300, 1000)  # Fewer transactions in the past
+                        hist_txns = generate_transactions(
+                            accounts if accounts_exist else [],
+                            transactions_per_day=hist_count,
+                            target_date=hist_date
+                        )
+                        batch_transactions.extend(hist_txns)
+                
+                if batch_transactions:
+                    logger.info(f"Generating historical transactions for {len(batch_dates_to_generate)} missing days (days {batch_start}-{batch_end-1} ago)...")
+                    logger.info(f"Inserting batch of {len(batch_transactions)} historical transactions...")
+                    insert_transactions(cursor, batch_transactions)
+                    historical_transactions.extend(batch_transactions)
+                    logger.info(f"✓ Batch completed. Total historical transactions so far: {len(historical_transactions)}")
+            
+            if historical_transactions:
+                logger.info(f"✓ Generated {len(historical_transactions)} total historical transactions (filling gaps to 1 year)")
+            else:
+                logger.info("✓ All 365 days already have transaction data")
+        else:
+            logger.info(f"Skipping historical transactions - already have {distinct_dates} days of transaction data (>= 365 days)")
         
         # Update account balances
         logger.info("-" * 60)
