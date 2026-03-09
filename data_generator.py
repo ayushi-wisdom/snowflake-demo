@@ -1,11 +1,12 @@
 """
 Generate realistic synthetic financial services data
 """
+import calendar
 import random
 import uuid
 import logging
 from datetime import datetime, timedelta, date
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,19 @@ MERCHANTS = [
 
 LOAN_TYPES = ["Mortgage", "Auto", "Personal", "Credit Line"]
 LOAN_STATUSES = ["Active", "Delinquent", "Paid Off", "Default"]
+
+# Real-world anomalies (recur every year/month)
+# Pay-day: last 2 days of month + first 2 days of month (payroll, rent, transfers)
+# Tax deadline: US federal Apr 15 — window Apr 10–18 (payments, transfers)
+TAX_MONTH = 4
+TAX_WINDOW_START_DAY = 10
+TAX_WINDOW_END_DAY = 18
+
+# Iran conflict / oil spike (Mar 2–9, 2026): Strait of Hormuz, oil >$100, market sell-off
+IRAN_OIL_EVENT_START = date(2026, 3, 2)
+IRAN_OIL_EVENT_END = date(2026, 3, 9)
+# Energy symbols that rally on oil spike; rest of market down
+ENERGY_SYMBOLS = {"XOM", "CVX", "COP", "SLB", "EOG", "PXD", "MPC", "VLO", "PSX", "OXY"}
 
 # Popular stock symbols for demo
 STOCK_SYMBOLS = [
@@ -154,61 +168,133 @@ def generate_accounts(customers: List[Dict], accounts_per_customer: Tuple[int, i
     
     return accounts
 
-def generate_transactions(accounts: List[Dict], transactions_per_day: int = 15000, 
+
+def _is_payday(target_date: date) -> bool:
+    """True if date is in pay-day window: last 2 days of month or first 2 days of month."""
+    day = target_date.day
+    if day <= 2:
+        return True
+    _, last_day = calendar.monthrange(target_date.year, target_date.month)
+    return day >= last_day - 1
+
+
+def _is_tax_deadline_window(target_date: date) -> bool:
+    """True if date is in US federal tax deadline window (Apr 10–18)."""
+    return (
+        target_date.month == TAX_MONTH
+        and TAX_WINDOW_START_DAY <= target_date.day <= TAX_WINDOW_END_DAY
+    )
+
+
+def _is_iran_oil_event_window(target_date: date) -> bool:
+    """True if date is in Iran conflict / oil spike event window (Mar 2–9, 2026)."""
+    return IRAN_OIL_EVENT_START <= target_date <= IRAN_OIL_EVENT_END
+
+
+def _anomaly_volume_multiplier(target_date: date) -> float:
+    """Volume multiplier for pay-day, tax-deadline, and Iran/oil anomalies."""
+    pay = _is_payday(target_date)
+    tax = _is_tax_deadline_window(target_date)
+    iran = _is_iran_oil_event_window(target_date)
+    if iran:
+        return 0.85  # ~15% lower volume: uncertainty, belt-tightening
+    if pay and tax:
+        return 1.4  # e.g. Apr 1–2 or Apr 10–18 overlapping pay-day
+    if pay:
+        return 1.25  # ~25% more around month-end/start
+    if tax:
+        return 1.35  # ~35% more around tax deadline (Apr 15)
+    return 1.0
+
+
+def _anomaly_category_weights(target_date: date) -> Optional[List[str]]:
+    """Heavier weight toward Deposit/Transfer (pay-day), Payment/Transfer (tax), or Gas/Withdrawal (Iran/oil). Returns None for normal mix."""
+    if _is_iran_oil_event_window(target_date):
+        # Higher fuel costs, more withdrawals and payments; stress spending mix
+        return ["Gas", "Gas", "Withdrawal", "Payment", "Payment"] + TRANSACTION_CATEGORIES
+    if _is_tax_deadline_window(target_date):
+        return ["Payment", "Payment", "Transfer", "Transfer"] + TRANSACTION_CATEGORIES
+    if _is_payday(target_date):
+        return ["Deposit", "Deposit", "Transfer", "Transfer", "Payment"] + TRANSACTION_CATEGORIES
+    return None
+
+
+def generate_transactions(accounts: List[Dict], transactions_per_day: int = 15000,
                          target_date: date = None) -> List[Dict]:
-    """Generate daily transactions"""
+    """Generate daily transactions. Applies pay-day and tax-deadline anomalies when applicable."""
     if target_date is None:
         target_date = date.today()
-    
+
+    volume_mult = _anomaly_volume_multiplier(target_date)
+    effective_count = max(1, int(transactions_per_day * volume_mult))
+    category_weights = _anomaly_category_weights(target_date)
+
     transactions = []
     active_accounts = [a for a in accounts if a["status"] == STATUS_ACTIVE]
-    
+
     if not active_accounts:
         return transactions
-    
-    for _ in range(transactions_per_day):
+
+    for _ in range(effective_count):
         account = random.choice(active_accounts)
         account_type = account["account_type"]
-        
-        # Transaction time throughout the day
+
         hour = random.randint(0, 23)
         minute = random.randint(0, 59)
         transaction_time = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=hour, minutes=minute)
-        
-        # Determine transaction type and amount
+
         if account_type == "Credit Card":
             transaction_type = random.choice(["Purchase", "Payment"])
             if transaction_type == "Purchase":
                 amount = -random.uniform(10, 500)
                 merchant = random.choice(MERCHANTS)
                 category = random.choice(TRANSACTION_CATEGORIES)
-            else:  # Payment
+            else:
                 amount = random.uniform(100, 2000)
                 merchant = None
                 category = "Payment"
         else:
-            transaction_type = random.choice(TRANSACTION_TYPES)
-            if transaction_type == "Deposit":
-                amount = random.uniform(100, 10000)
-                merchant = None
-                category = "Deposit"
-            elif transaction_type == "Withdrawal":
-                amount = -random.uniform(50, 5000)
-                merchant = None
-                category = "Withdrawal"
-            elif transaction_type == "Transfer":
-                amount = random.choice([random.uniform(100, 5000), -random.uniform(100, 5000)])
-                merchant = None
-                category = "Transfer"
-            elif transaction_type == "Purchase":
-                amount = -random.uniform(10, 500)
-                merchant = random.choice(MERCHANTS)
-                category = random.choice(TRANSACTION_CATEGORIES)
-            else:  # Payment
-                amount = -random.uniform(50, 1000)
-                merchant = None
-                category = "Payment"
-        
+            if category_weights:
+                category = random.choice(category_weights)
+                if category == "Deposit":
+                    transaction_type = "Deposit"
+                    amount = random.uniform(200, 12000)
+                    merchant = None
+                elif category == "Payment":
+                    transaction_type = "Payment"
+                    amount = -random.uniform(50, 3000)
+                    merchant = None
+                elif category == "Transfer":
+                    transaction_type = "Transfer"
+                    amount = random.choice([random.uniform(200, 6000), -random.uniform(200, 6000)])
+                    merchant = None
+                else:
+                    transaction_type = "Purchase"
+                    amount = -random.uniform(10, 500)
+                    merchant = random.choice(MERCHANTS)
+            else:
+                transaction_type = random.choice(TRANSACTION_TYPES)
+                if transaction_type == "Deposit":
+                    amount = random.uniform(100, 10000)
+                    merchant = None
+                    category = "Deposit"
+                elif transaction_type == "Withdrawal":
+                    amount = -random.uniform(50, 5000)
+                    merchant = None
+                    category = "Withdrawal"
+                elif transaction_type == "Transfer":
+                    amount = random.choice([random.uniform(100, 5000), -random.uniform(100, 5000)])
+                    merchant = None
+                    category = "Transfer"
+                elif transaction_type == "Purchase":
+                    amount = -random.uniform(10, 500)
+                    merchant = random.choice(MERCHANTS)
+                    category = random.choice(TRANSACTION_CATEGORIES)
+                else:
+                    amount = -random.uniform(50, 1000)
+                    merchant = None
+                    category = "Payment"
+
         transaction = {
             "transaction_id": generate_transaction_id(),
             "account_id": account["account_id"],
@@ -223,7 +309,7 @@ def generate_transactions(accounts: List[Dict], transactions_per_day: int = 1500
             "reference_number": f"REF{random.randint(100000, 999999)}"
         }
         transactions.append(transaction)
-    
+
     return transactions
 
 def fetch_real_market_prices(symbols: List[str] = None, web_search_func=None, real_prices_dict: Dict[str, float] = None) -> Dict[str, float]:
@@ -261,6 +347,24 @@ def fetch_real_market_prices(symbols: List[str] = None, web_search_func=None, re
         prices[symbol] = round(random.uniform(50, 500), 2)
     
     return prices
+
+
+def apply_iran_oil_price_shock(prices: Dict[str, float], as_of_date: date) -> Dict[str, float]:
+    """
+    Apply Iran conflict / oil spike shock to prices when as_of_date is in event window.
+    Energy symbols rally (~+15%), rest of market down (~-5%). Returns new dict; does not mutate input.
+    """
+    if not _is_iran_oil_event_window(as_of_date):
+        return dict(prices)
+    out = {}
+    for symbol, p in prices.items():
+        if symbol in ENERGY_SYMBOLS:
+            out[symbol] = round(p * 1.15, 2)
+        else:
+            out[symbol] = round(p * 0.95, 2)
+    logger.info(f"Applied Iran/oil price shock for {as_of_date}: energy +15%, broad market -5%")
+    return out
+
 
 def generate_portfolio_holdings(accounts: List[Dict], price_lookup: Dict[str, float]) -> List[Dict]:
     """Generate portfolio holdings for investment accounts using real market prices"""

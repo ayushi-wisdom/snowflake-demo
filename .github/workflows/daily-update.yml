@@ -1,0 +1,38 @@
+# Run daily_financial_update.py at 11:00 AM UTC, weekdays only (Mon–Fri)
+name: Daily Snowflake Update
+
+on:
+  schedule:
+    - cron: '0 11 * * 1-5'   # 11:00 AM UTC, Monday–Friday
+  workflow_dispatch:      # Allow manual run from Actions tab
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          ./venv/bin/pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        run: |
+          cat << EOF > .env
+          SNOWFLAKE_ACCOUNT=${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER=${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PAT_TOKEN=${{ secrets.SNOWFLAKE_PAT_TOKEN }}
+          SNOWFLAKE_WAREHOUSE=${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE=${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA }}
+          SNOWFLAKE_ROLE=${{ secrets.SNOWFLAKE_ROLE }}
+          EOF
+
+      - name: Run daily update
+        run: ./venv/bin/python daily_financial_update.py

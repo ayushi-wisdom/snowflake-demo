@@ -5,13 +5,15 @@ Generates and loads synthetic data into Snowflake
 from snowflake_connection import get_snowflake_connection
 from data_generator import (
     generate_customers, generate_accounts, generate_transactions,
-    generate_portfolio_holdings, generate_loans
+    generate_portfolio_holdings, generate_loans,
+    fetch_real_market_prices,
+    apply_iran_oil_price_shock,
 )
 from datetime import date, timedelta, datetime
 import logging
 import random
+import sys
 import time
-from data_generator import fetch_real_market_prices
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,16 +314,26 @@ def daily_update():
         # Transactions
         logger.info("-" * 60)
         logger.info("Step 1: Generating transactions...")
-        # More realistic: 500-1,500 transactions per day (~0.2-0.5 per account on average)
-        transaction_count = random.randint(500, 1500)
-        logger.info(f"Generating {transaction_count} transactions for today...")
-        transactions = generate_transactions(
-            accounts if accounts_exist else [],
-            transactions_per_day=transaction_count,
-            target_date=target_date
+        # Skip today's batch if we already have transactions for today (e.g. from an earlier run)
+        cursor.execute(
+            "SELECT COUNT(*) FROM transactions WHERE transaction_date = %s",
+            (target_date,)
         )
-        logger.info(f"Generated {len(transactions)} transactions for today")
-        insert_transactions(cursor, transactions)
+        today_count = cursor.fetchone()[0]
+        if today_count > 0:
+            logger.info(f"Already have {today_count} transactions for {target_date}; skipping today's generation to avoid duplicates")
+            transactions = []
+        else:
+            # More realistic: 500-1,500 transactions per day (~0.2-0.5 per account on average)
+            transaction_count = random.randint(500, 1500)
+            logger.info(f"Generating {transaction_count} transactions for today...")
+            transactions = generate_transactions(
+                accounts if accounts_exist else [],
+                transactions_per_day=transaction_count,
+                target_date=target_date
+            )
+            logger.info(f"Generated {len(transactions)} transactions for today")
+            insert_transactions(cursor, transactions)
         
         # Generate historical transactions (last 365 days / 1 year) if needed
         cursor.execute("SELECT COUNT(*) FROM transactions")
@@ -408,9 +420,10 @@ def daily_update():
                 # When integrated with your tool with web search, you can:
                 #   1. Fetch real prices using your web_search tool
                 #   2. Pass them as: fetch_real_market_prices(real_prices_dict=your_price_dict)
-                # For now, using synthetic prices
+                # For now, using synthetic prices; apply Iran/oil shock when in event window
                 real_prices = fetch_real_market_prices()
-                logger.info(f"Fetched {len(real_prices)} real market prices")
+                real_prices = apply_iran_oil_price_shock(real_prices, target_date)
+                logger.info(f"Fetched {len(real_prices)} market prices (Iran/oil shock applied if in event window)")
                 
                 logger.info(f"Generating holdings for {len(investment_accounts)} investment accounts...")
                 holdings = generate_portfolio_holdings(investment_accounts, real_prices)
@@ -420,6 +433,16 @@ def daily_update():
                 logger.info("No investment accounts found, skipping portfolio holdings")
         else:
             logger.info("Skipping portfolio holdings (no accounts available)")
+        
+        # Keep only the last 365 days of transactions (rolling 1-year window)
+        logger.info("-" * 60)
+        logger.info("Step 4: Pruning transactions to keep only last 365 days...")
+        cursor.execute("""
+            DELETE FROM transactions 
+            WHERE transaction_date < DATEADD(day, -364, CURRENT_DATE())
+        """)
+        deleted = cursor.rowcount
+        logger.info(f"✓ Removed {deleted:,} transactions older than 365 days (rolling 1-year window)")
         
         elapsed_time = time.time() - start_time
         logger.info("=" * 60)
@@ -436,4 +459,9 @@ def daily_update():
         conn.close()
 
 if __name__ == "__main__":
-    daily_update()
+    try:
+        daily_update()
+        # Force process exit so Snowflake connector background threads don't keep the process alive
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)

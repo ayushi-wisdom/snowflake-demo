@@ -1,0 +1,59 @@
+# Metric definitions and calculation logic.
+# Column/table reference: docs/schema.yml
+# Table relationships: docs/data_model.md
+
+metrics:
+  - name: current_balance
+    description: Account book balance after applying same-day completed transactions.
+    source_table: accounts
+    source_column: current_balance
+    calculation: |
+      Stored value is updated by pipeline: previous current_balance + SUM(transactions.amount)
+      for the account where transaction_date = balance update date and status = 'Completed'.
+    notes: Balance is not a running sum over all history; only same-day transaction sum is applied on each run.
+
+  - name: available_balance
+    description: Amount available to use (e.g. after holds).
+    source_table: accounts
+    source_column: available_balance
+    calculation: |
+      Set to (new current_balance after same-day txns) * 0.95 in the pipeline.
+      Represents approximate available amount (e.g. hold buffer).
+
+  - name: market_value
+    description: Current market value of a single holding.
+    source_table: portfolio_holdings
+    source_column: market_value
+    calculation: quantity * current_price
+
+  - name: unrealized_pnl
+    description: Unrealized gain or loss on a holding vs purchase.
+    source_table: portfolio_holdings
+    source_column: unrealized_pnl
+    calculation: (current_price - purchase_price) * quantity
+
+  - name: daily_transaction_volume
+    description: Total count of transactions on a given date.
+    source_tables: [transactions]
+    calculation: COUNT(*) WHERE transaction_date = <date>. Filter by status or account as needed.
+
+  - name: daily_transaction_amount
+    description: Net sum of transaction amounts for a date (or account/segment).
+    source_tables: [transactions]
+    calculation: SUM(amount) WHERE transaction_date = <date> AND status = 'Completed'.
+
+  - name: total_aum
+    description: Total market value of all investment holdings.
+    source_table: portfolio_holdings
+    calculation: SUM(market_value) across portfolio_holdings. Filter by account_id or date as needed.
+
+  - name: outstanding_principal
+    description: Total current principal across loans.
+    source_table: loans
+    source_column: current_principal_balance
+    calculation: SUM(current_principal_balance). Filter by status (e.g. Active) or customer/segment as needed.
+
+  - name: delinquent_balance
+    description: Principal balance on delinquent loans.
+    source_table: loans
+    calculation: SUM(current_principal_balance) WHERE status = 'Delinquent' (or days_past_due > 0).

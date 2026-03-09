@@ -1,0 +1,219 @@
+# Table and column metadata (dbt-style).
+# Relationships and join keys: see data_model.md
+# Metric definitions: see metrics.yml
+
+database: SE_DEMOS_NEW
+schema: FINANCE_MAIN
+
+tables:
+  - name: customers
+    description: Customer master data; one row per customer.
+    columns:
+      - name: customer_id
+        data_type: VARCHAR(50)
+        description: Unique customer identifier (e.g. CUST_xxxxxxxx).
+      - name: first_name
+        data_type: VARCHAR(100)
+        description: Customer first name.
+      - name: last_name
+        data_type: VARCHAR(100)
+        description: Customer last name.
+      - name: email
+        data_type: VARCHAR(255)
+        description: Customer email address.
+      - name: phone
+        data_type: VARCHAR(20)
+        description: Phone number.
+      - name: date_of_birth
+        data_type: DATE
+        description: Customer date of birth.
+      - name: address_city
+        data_type: VARCHAR(100)
+        description: City in mailing address.
+      - name: address_state
+        data_type: VARCHAR(2)
+        description: US state code (e.g. NY, CA).
+      - name: address_zip
+        data_type: VARCHAR(10)
+        description: ZIP or postal code.
+      - name: customer_segment
+        data_type: VARCHAR(50)
+        description: Tier; accepted values Premium, Standard, Basic.
+      - name: created_date
+        data_type: DATE
+        description: Date the customer record was created.
+      - name: status
+        data_type: VARCHAR(20)
+        description: Accepted values Active, Inactive.
+      - name: updated_at
+        data_type: TIMESTAMP_NTZ
+        description: Last row update timestamp.
+
+  - name: accounts
+    description: Account master data; one row per account, linked to one customer.
+    columns:
+      - name: account_id
+        data_type: VARCHAR(50)
+        description: Unique account identifier (e.g. ACC_xxxxxxxx).
+      - name: customer_id
+        data_type: VARCHAR(50)
+        description: Owner customer; references customers.
+      - name: account_number
+        data_type: VARCHAR(50)
+        description: Display account number (e.g. 10-digit).
+      - name: account_type
+        data_type: VARCHAR(50)
+        description: Accepted values Checking, Savings, Investment, Credit Card.
+      - name: opened_date
+        data_type: DATE
+        description: Account opening date.
+      - name: status
+        data_type: VARCHAR(20)
+        description: Accepted values Active, Closed.
+      - name: currency
+        data_type: VARCHAR(3)
+        description: Account currency (e.g. USD).
+      - name: current_balance
+        data_type: FLOAT
+        description: Book balance; updated from transactions (see metrics.yml).
+      - name: available_balance
+        data_type: FLOAT
+        description: Available-to-use balance; derived from current_balance.
+      - name: balance_last_updated_date
+        data_type: DATE
+        description: Date balances were last recalculated.
+      - name: updated_at
+        data_type: TIMESTAMP_NTZ
+        description: Last row update timestamp.
+
+  - name: transactions
+    description: One row per transaction; daily and historical, rolling 365-day window.
+    columns:
+      - name: transaction_id
+        data_type: VARCHAR(50)
+        description: Unique transaction identifier (e.g. TXN_xxxxxxxx).
+      - name: account_id
+        data_type: VARCHAR(50)
+        description: Account on which the transaction posted; references accounts.
+      - name: transaction_date
+        data_type: DATE
+        description: Posting date of the transaction.
+      - name: transaction_time
+        data_type: TIMESTAMP_NTZ
+        description: Timestamp of the transaction.
+      - name: amount
+        data_type: FLOAT
+        description: Signed amount; positive for credits (e.g. Deposit), negative for debits.
+      - name: transaction_type
+        data_type: VARCHAR(50)
+        description: Accepted values Deposit, Withdrawal, Transfer, Payment, Purchase.
+      - name: merchant_name
+        data_type: VARCHAR(255)
+        description: Merchant or counterparty name when applicable.
+      - name: category
+        data_type: VARCHAR(100)
+        description: Spend category (e.g. Groceries, Gas, Utilities, Other).
+      - name: description
+        data_type: VARCHAR(500)
+        description: Free-text transaction description.
+      - name: status
+        data_type: VARCHAR(20)
+        description: Accepted values Completed, Pending, Failed (balance logic uses Completed).
+      - name: reference_number
+        data_type: VARCHAR(100)
+        description: External or internal reference ID.
+      - name: created_at
+        data_type: TIMESTAMP_NTZ
+        description: Row insert timestamp.
+
+  - name: portfolio_holdings
+    description: Investment positions per account; only for account_type = Investment.
+    columns:
+      - name: holding_id
+        data_type: VARCHAR(50)
+        description: Unique holding identifier (e.g. HOLD_xxxxxxxx).
+      - name: account_id
+        data_type: VARCHAR(50)
+        description: Investment account; references accounts.
+      - name: security_symbol
+        data_type: VARCHAR(10)
+        description: Ticker symbol (e.g. AAPL, MSFT).
+      - name: security_name
+        data_type: VARCHAR(255)
+        description: Full security name.
+      - name: quantity
+        data_type: FLOAT
+        description: Number of shares or units held.
+      - name: purchase_date
+        data_type: DATE
+        description: Original purchase date.
+      - name: purchase_price
+        data_type: FLOAT
+        description: Price per unit at purchase.
+      - name: current_price
+        data_type: FLOAT
+        description: Price per unit as of updated_date (from market feed).
+      - name: market_value
+        data_type: FLOAT
+        description: quantity * current_price (see metrics.yml).
+      - name: unrealized_pnl
+        data_type: FLOAT
+        description: Unrealized gain/loss vs purchase (see metrics.yml).
+      - name: updated_date
+        data_type: DATE
+        description: Date current_price and derived fields were updated.
+      - name: updated_at
+        data_type: TIMESTAMP_NTZ
+        description: Last row update timestamp.
+
+  - name: loans
+    description: Loan contracts; one row per loan, linked to customer and optionally an account.
+    columns:
+      - name: loan_id
+        data_type: VARCHAR(50)
+        description: Unique loan identifier (e.g. LOAN_xxxxxxxx).
+      - name: customer_id
+        data_type: VARCHAR(50)
+        description: Borrower; references customers.
+      - name: account_id
+        data_type: VARCHAR(50)
+        description: Linked account when applicable; references accounts.
+      - name: loan_type
+        data_type: VARCHAR(50)
+        description: Accepted values Mortgage, Auto, Personal, Credit Line.
+      - name: original_principal
+        data_type: FLOAT
+        description: Original loan amount at origination.
+      - name: current_principal_balance
+        data_type: FLOAT
+        description: Outstanding principal as of balance_last_updated_date.
+      - name: interest_rate
+        data_type: FLOAT
+        description: Stated interest rate (e.g. annual).
+      - name: term_months
+        data_type: INTEGER
+        description: Loan term in months.
+      - name: origination_date
+        data_type: DATE
+        description: Loan origination date.
+      - name: maturity_date
+        data_type: DATE
+        description: Loan maturity date.
+      - name: days_past_due
+        data_type: INTEGER
+        description: Days past due as of last update.
+      - name: next_payment_date
+        data_type: DATE
+        description: Next scheduled payment date.
+      - name: next_payment_amount
+        data_type: FLOAT
+        description: Next scheduled payment amount.
+      - name: status
+        data_type: VARCHAR(20)
+        description: Accepted values Active, Delinquent, Paid Off, Default.
+      - name: balance_last_updated_date
+        data_type: DATE
+        description: Date current_principal_balance was last updated.
+      - name: updated_at
+        data_type: TIMESTAMP_NTZ
+        description: Last row update timestamp.

@@ -40,6 +40,16 @@ This project creates a comprehensive financial services dataset with 6 related t
    python daily_financial_update.py
    ```
 
+## Data catalog (for AI / data platforms)
+
+Table and column descriptions, metric definitions, and relationships are in version-controlled docs:
+
+- **`docs/schema.yml`** — Table and column metadata (names, types, descriptions, accepted values).
+- **`docs/metrics.yml`** — Metric definitions and calculation logic.
+- **`docs/data_model.md`** — Entity relationships and join keys.
+
+To sync descriptions into Snowflake, run **`scripts/apply_table_comments.sql`** (adjust database/schema at the top if needed).
+
 ## Files
 
 - `create_schema.py` - Creates all 6 tables in Snowflake
@@ -71,3 +81,19 @@ This project creates a comprehensive financial services dataset with 6 related t
 - **Initial load:** ~7,000-8,000 master records
 - **Daily updates:** ~12,000-25,000 new/updated rows per day
 - All data is raw (no pre-calculated metrics)
+
+## Real-world anomalies (pay-day & tax deadline)
+
+Transaction generation applies two recurring, real-world patterns:
+
+- **Pay-day (every month):** Last 2 days of the month and first 2 days of the month — ~25% more volume; heavier mix of **Deposits** and **Transfers** (payroll, rent).
+- **Tax deadline:** US federal window **Apr 10–18** (deadline Apr 15) — ~35% more volume; heavier mix of **Payments** and **Transfers** (tax payments, refunds).
+
+To **backfill** a date range with these anomalies (replaces existing transactions in range, then recalculates balances):
+
+```bash
+python backfill_with_anomalies.py
+python backfill_with_anomalies.py --start 2025-03-10 --end 2026-03-09
+```
+
+Defaults: `--start` = today − 364 days, `--end` = today (full rolling 365-day window). For a full year backfill, the script may run for a while.
