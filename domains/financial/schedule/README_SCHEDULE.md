@@ -6,6 +6,15 @@ Use one of the options below so `daily_financial_update.py` runs every day.
 
 ## Option 1: cron (Mac / Linux)
 
+**Quick install** (adds/updates the cron job for 6:00 AM daily):
+```bash
+cd /Users/ayushi/Documents/snowflake-daily-update
+./schedule/install_cron.sh
+```
+To use a different time (e.g. 2:00 AM): `CRON_TIME='0 2 * * *' ./schedule/install_cron.sh`
+
+**Manual setup** (if you prefer to edit crontab yourself):
+
 1. **Create a log directory** (so the run script can write logs):
    ```bash
    mkdir -p /Users/ayushi/Documents/snowflake-daily-update/logs
@@ -25,14 +34,8 @@ Use one of the options below so `daily_financial_update.py` runs every day.
    ```cron
    0 6 * * * /Users/ayushi/Documents/snowflake-daily-update/run_daily_update.sh
    ```
-   Or at 2:00 AM:
-   ```cron
-   0 2 * * * /Users/ayushi/Documents/snowflake-daily-update/run_daily_update.sh
-   ```
 
-5. **Save and exit** (in vim: `Esc` then `:wq`).
-
-**Note:** cron runs with a minimal environment. If you get errors, use the full path to the script and ensure `.env` is in the project directory (it is). The script uses the venv inside the project, so no need to activate anything.
+**Note:** cron runs with a minimal environment. The script uses the venv and `.env` in the project directory. Logs go to `logs/daily_update.log`.
 
 ---
 

@@ -1,3 +1,6 @@
 snowflake-connector-python
 python-dotenv
 yfinance
+faker
+numpy
+holidays

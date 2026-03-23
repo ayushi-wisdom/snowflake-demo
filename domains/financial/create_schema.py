@@ -1,6 +1,7 @@
 """
 Create all financial services tables in Snowflake
 """
+import os
 from snowflake_connection import get_snowflake_connection
 import logging
 
@@ -15,8 +16,16 @@ def create_all_tables():
     
     conn = get_snowflake_connection()
     cursor = conn.cursor()
+    db = os.getenv("SNOWFLAKE_DATABASE")
+    schema = os.getenv("SNOWFLAKE_SCHEMA") or "FINANCE_MAIN"
     
     try:
+        # Ensure session has a current schema (create if missing)
+        if db and schema:
+            cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {db}.{schema}")
+            cursor.execute(f"USE SCHEMA {db}.{schema}")
+            logger.info("Using schema %s.%s", db, schema)
+        
         # 1. Customers table
         logger.info("Creating customers table...")
         cursor.execute("""
@@ -105,9 +114,12 @@ def create_all_tables():
                 customer_id VARCHAR(50),
                 account_id VARCHAR(50),
                 loan_type VARCHAR(50),
+                industry_sector VARCHAR(50),
                 original_principal FLOAT,
                 current_principal_balance FLOAT,
                 interest_rate FLOAT,
+                original_interest_rate FLOAT,
+                rate_type VARCHAR(20) DEFAULT 'fixed',
                 term_months INTEGER,
                 origination_date DATE,
                 maturity_date DATE,

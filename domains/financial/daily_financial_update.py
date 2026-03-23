@@ -2,12 +2,46 @@
 Daily update script for financial services dataset
 Generates and loads synthetic data into Snowflake
 """
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure project .env is used (SE_DEMOS_NEW, FINANCE_MAIN)
+_env_file = Path(__file__).resolve().parent / ".env"
+load_dotenv(_env_file, override=True)
+
+
+# Canonical target from project .env (docs/PROJECT_INSTRUCTIONS.md)
+_DATABASE = "SE_DEMOS_NEW"
+_SCHEMA = "FINANCE_MAIN"
+
+
+def _get_project_db_schema():
+    """Read database and schema from project .env; fall back to canonical target."""
+    env = {}
+    if _env_file.exists():
+        for line in _env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    db = env.get("SNOWFLAKE_DATABASE") or _DATABASE
+    schema = env.get("SNOWFLAKE_SCHEMA") or _SCHEMA
+    return db, schema
+
+from config import get_data_as_of_date
 from snowflake_connection import get_snowflake_connection
 from data_generator import (
     generate_customers, generate_accounts, generate_transactions,
     generate_portfolio_holdings, generate_loans,
     fetch_real_market_prices,
+    fetch_real_stock_prices_yfinance,
     apply_iran_oil_price_shock,
+    get_oil_elevated_from_real_data,
+    _is_iran_oil_event_window,
+    STOCK_SYMBOLS,
+    VARIABLE_RATE_RESET_START,
+    VARIABLE_RATE_CREEP_PER_DAY,
 )
 from datetime import date, timedelta, datetime
 import logging
@@ -111,6 +145,34 @@ def insert_transactions(cursor, transactions):
     logger.info(f"✓ Inserted {len(transactions)} transactions")
 
 
+def update_existing_holdings_prices(cursor, price_lookup: dict, as_of_date):
+    """Refresh current_price, market_value, unrealized_pnl, and updated_date for all existing holdings."""
+    cursor.execute("""
+        SELECT holding_id, account_id, security_symbol, quantity, purchase_price
+        FROM portfolio_holdings
+    """)
+    rows = cursor.fetchall()
+    if not rows:
+        logger.info("No existing holdings to update")
+        return
+    batch = []
+    for (holding_id, account_id, security_symbol, quantity, purchase_price) in rows:
+        current_price = price_lookup.get(security_symbol)
+        if current_price is None:
+            current_price = price_lookup.get(list(price_lookup.keys())[0], 100.0)  # fallback
+        market_value = round(float(quantity) * float(current_price), 2)
+        unrealized_pnl = round((float(current_price) - float(purchase_price)) * float(quantity), 2)
+        batch.append((float(current_price), market_value, unrealized_pnl, as_of_date, holding_id))
+    update_sql = """
+        UPDATE portfolio_holdings
+        SET current_price = %s, market_value = %s, unrealized_pnl = %s, updated_date = %s, updated_at = CURRENT_TIMESTAMP()
+        WHERE holding_id = %s
+    """
+    batch_size = 500
+    for i in range(0, len(batch), batch_size):
+        cursor.executemany(update_sql, batch[i:i + batch_size])
+    logger.info(f"✓ Updated prices and updated_date for {len(batch)} existing portfolio holdings")
+
 def insert_portfolio_holdings(cursor, holdings):
     """Insert or update portfolio holdings using batch INSERT/UPDATE"""
     if not holdings:
@@ -195,17 +257,17 @@ def insert_loans(cursor, loans):
     logger.info(f"Inserting {len(loans)} loans...")
     insert_sql = """
         INSERT INTO loans (
-            loan_id, customer_id, account_id, loan_type, original_principal,
-            current_principal_balance, interest_rate, term_months, origination_date,
-            maturity_date, days_past_due, next_payment_date, next_payment_amount,
-            status, balance_last_updated_date
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            loan_id, customer_id, account_id, loan_type, industry_sector,
+            original_principal, current_principal_balance, interest_rate, original_interest_rate, rate_type,
+            term_months, origination_date, maturity_date, days_past_due,
+            next_payment_date, next_payment_amount, status, balance_last_updated_date
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-    
     values = [
         (
-            l["loan_id"], l["customer_id"], l["account_id"], l["loan_type"],
+            l["loan_id"], l["customer_id"], l["account_id"], l["loan_type"], l.get("industry_sector", "Other"),
             l["original_principal"], l["current_principal_balance"], l["interest_rate"],
+            l["original_interest_rate"], l["rate_type"],
             l["term_months"], l["origination_date"], l["maturity_date"],
             l["days_past_due"], l["next_payment_date"], l["next_payment_amount"],
             l["status"], l["balance_last_updated_date"]
@@ -216,9 +278,9 @@ def insert_loans(cursor, loans):
     cursor.executemany(insert_sql, values)
     logger.info(f"✓ Inserted {len(loans)} loans")
 
-def update_account_balances(cursor, transactions):
-    """Update account balances based on transactions"""
-    logger.info("Updating account balances from transactions...")
+def update_account_balances(cursor, target_date: date):
+    """Update account balances based on transactions for target_date (so demo can use DATA_AS_OF_DATE)."""
+    logger.info("Updating account balances from transactions for %s...", target_date)
     
     update_sql = """
         UPDATE accounts a
@@ -227,25 +289,25 @@ def update_account_balances(cursor, transactions):
                 SELECT SUM(t.amount)
                 FROM transactions t
                 WHERE t.account_id = a.account_id
-                  AND t.transaction_date = CURRENT_DATE()
+                  AND t.transaction_date = %s
                   AND t.status = 'Completed'
             ), 0),
             available_balance = a.current_balance + COALESCE((
                 SELECT SUM(t.amount)
                 FROM transactions t
                 WHERE t.account_id = a.account_id
-                  AND t.transaction_date = CURRENT_DATE()
+                  AND t.transaction_date = %s
                   AND t.status = 'Completed'
             ), 0) * 0.95,
-            balance_last_updated_date = CURRENT_DATE()
+            balance_last_updated_date = %s
         WHERE EXISTS (
             SELECT 1 FROM transactions t
             WHERE t.account_id = a.account_id
-              AND t.transaction_date = CURRENT_DATE()
+              AND t.transaction_date = %s
         )
     """
     
-    cursor.execute(update_sql)
+    cursor.execute(update_sql, (target_date, target_date, target_date, target_date))
     rows_updated = cursor.rowcount
     logger.info(f"✓ Updated balances for {rows_updated} accounts")
 
@@ -275,41 +337,65 @@ def daily_update():
     start_time = time.time()
     conn = get_snowflake_connection()
     cursor = conn.cursor()
-    
+    # Always use project target (SE_DEMOS_NEW.FINANCE_MAIN) per PROJECT_INSTRUCTIONS
+    db, schema = _DATABASE, _SCHEMA
+
     try:
-        target_date = date.today()
+        cursor.execute(f"USE DATABASE {db}")
+        logger.info("Using database: %s", db)
+        cursor.execute(f"USE SCHEMA {schema}")
+        logger.info("Using schema: %s", schema)
+
+        target_date = get_data_as_of_date()
         logger.info("=" * 60)
-        logger.info(f"Starting daily update for {target_date}")
+        logger.info(f"Starting daily update for {target_date} (data will not extend past this date)")
         logger.info("=" * 60)
         
         # Check if master data exists
-        customers_exist, accounts_exist, loans_exist = check_master_data_exists(cursor)
+        try:
+            customers_exist, accounts_exist, loans_exist = check_master_data_exists(cursor)
+        except Exception as e:
+            if "does not exist" in str(e) or "not authorized" in str(e).lower():
+                raise RuntimeError(
+                    f"Table not found or not authorized in {db or '?'}.{schema or '?'}. "
+                    f"Confirm SNOWFLAKE_DATABASE and SNOWFLAKE_SCHEMA in .env match where your tables are, "
+                    f"or create tables with: python create_schema.py"
+                ) from e
+            raise
         
         # Generate master data if it doesn't exist
         if not customers_exist:
             logger.info("Generating master data (customers, accounts, loans)...")
             customers = generate_customers(count=1500)
             accounts = generate_accounts(customers)
-            loans = generate_loans(customers, accounts)
+            loans = generate_loans(customers, accounts, as_of_date=target_date)
             
             insert_customers(cursor, customers)
             insert_accounts(cursor, accounts)
             insert_loans(cursor, loans)
         else:
             logger.info("Master data already exists, skipping generation")
-            # Get existing accounts for transaction generation
-            accounts = get_existing_accounts(cursor)
+        
+        # Ensure we have accounts for transaction generation (from DB so shape is consistent)
+        accounts = get_existing_accounts(cursor)
+        logger.info("Found %s active accounts for transaction generation", len(accounts))
         
         # Generate daily data
         logger.info("=" * 60)
         logger.info("Generating daily data...")
         logger.info("=" * 60)
-        
-        # Get accounts for transaction generation
-        if accounts_exist:
-            logger.info("Fetching existing accounts for transaction generation...")
-            accounts = get_existing_accounts(cursor)
-            logger.info(f"Found {len(accounts)} active accounts")
+
+        # Oil/energy: when using DATA_AS_OF_DATE (demo), use date window only (Feb 1 - Mar 10). Else try real XLE first.
+        if get_data_as_of_date() != date.today():
+            oil_elevated = _is_iran_oil_event_window(target_date)
+            logger.info("Oil/energy: date-window (elevated=%s)", oil_elevated)
+        else:
+            oil_elevated = get_oil_elevated_from_real_data()
+            if oil_elevated is None:
+                oil_elevated = _is_iran_oil_event_window(target_date)
+                logger.info("Oil/energy: date-window fallback (elevated=%s)", oil_elevated)
+            else:
+                logger.info("Oil/energy: real-data check (elevated=%s)", oil_elevated)
         
         # Transactions
         logger.info("-" * 60)
@@ -324,13 +410,15 @@ def daily_update():
             logger.info(f"Already have {today_count} transactions for {target_date}; skipping today's generation to avoid duplicates")
             transactions = []
         else:
-            # More realistic: 500-1,500 transactions per day (~0.2-0.5 per account on average)
-            transaction_count = random.randint(500, 1500)
+            # For today only: pass oil_elevated from real-data check (or fallback)
+            transaction_count = random.randint(650, 1000)
             logger.info(f"Generating {transaction_count} transactions for today...")
             transactions = generate_transactions(
-                accounts if accounts_exist else [],
+                accounts,
                 transactions_per_day=transaction_count,
-                target_date=target_date
+                target_date=target_date,
+                oil_elevated_override=oil_elevated,
+                reference_date=target_date,
             )
             logger.info(f"Generated {len(transactions)} transactions for today")
             insert_transactions(cursor, transactions)
@@ -365,14 +453,15 @@ def daily_update():
                 
                 for days_ago in range(batch_start, batch_end):
                     hist_date = target_date - timedelta(days=days_ago)
-                    # Only generate if we don't already have data for this date
+                    # Only generate if we don't already have data for this date (never generate after target_date)
                     if hist_date not in existing_dates:
                         batch_dates_to_generate.append(hist_date)
-                        hist_count = random.randint(300, 1000)  # Fewer transactions in the past
+                        hist_count = random.randint(400, 800)  # Fewer in the past; tighter range to avoid spikes
                         hist_txns = generate_transactions(
-                            accounts if accounts_exist else [],
+                            accounts,
                             transactions_per_day=hist_count,
-                            target_date=hist_date
+                            target_date=hist_date,
+                            reference_date=target_date,
                         )
                         batch_transactions.extend(hist_txns)
                 
@@ -390,57 +479,77 @@ def daily_update():
         else:
             logger.info(f"Skipping historical transactions - already have {distinct_dates} days of transaction data (>= 365 days)")
         
-        # Update account balances
+        # Update account balances (for target_date so DATA_AS_OF_DATE works)
         logger.info("-" * 60)
         logger.info("Step 2: Updating account balances from transactions...")
-        if transactions:
-            update_account_balances(cursor, transactions)
+        update_account_balances(cursor, target_date)
         logger.info("Account balances updated")
         
+        # Update loan balance_last_updated_date for active loans (so "Latest Loan Balance Update Date" moves)
+        logger.info("-" * 60)
+        logger.info("Step 2b: Updating loan balance dates...")
+        cursor.execute("""
+            UPDATE loans
+            SET balance_last_updated_date = %s, updated_at = CURRENT_TIMESTAMP()
+            WHERE status = 'Active'
+        """, (target_date,))
+        logger.info(f"✓ Updated balance_last_updated_date for {cursor.rowcount} active loans")
+
+        # Variable-rate loans: rate resets creeping up since Feb 1
+        days_since_reset = (target_date - VARIABLE_RATE_RESET_START).days
+        if days_since_reset > 0:
+            rate_creep = round(days_since_reset * VARIABLE_RATE_CREEP_PER_DAY, 2)
+            cursor.execute("""
+                UPDATE loans
+                SET interest_rate = LEAST(original_interest_rate + %s, 25.0),
+                    updated_at = CURRENT_TIMESTAMP()
+                WHERE rate_type = 'variable' AND status = 'Active'
+                  AND original_interest_rate IS NOT NULL
+            """, (rate_creep,))
+            logger.info(f"✓ Variable-rate reset: +{rate_creep}%% since Feb 1 for {cursor.rowcount} loans")
+        else:
+            logger.info("Variable-rate reset: before Feb 1, no creep applied")
+
         # Portfolio holdings (only if we have accounts)
-        # Note: Real market prices should be provided via web search
         logger.info("-" * 60)
         logger.info("Step 3: Generating portfolio holdings with real market prices...")
-        if accounts_exist or not customers_exist:
-            if not accounts_exist:
-                logger.info("Fetching investment accounts from database...")
-                cursor.execute("SELECT account_id, account_type, status, opened_date FROM accounts WHERE account_type = 'Investment' AND status = 'Active'")
-                investment_accounts = [
-                    {"account_id": row[0], "account_type": row[1], "status": row[2], "opened_date": row[3]}
-                    for row in cursor.fetchall()
-                ]
-                logger.info(f"Found {len(investment_accounts)} investment accounts")
+        investment_accounts = [a for a in accounts if a["account_type"] == "Investment" and a.get("opened_date")]
+        if investment_accounts:
+            logger.info("Fetching market prices for portfolio holdings...")
+            real_prices_dict = fetch_real_stock_prices_yfinance(STOCK_SYMBOLS[:80])
+            if real_prices_dict:
+                real_prices = fetch_real_market_prices(real_prices_dict=real_prices_dict)
             else:
-                investment_accounts = [a for a in accounts if a["account_type"] == "Investment" and a.get("opened_date")]
-                logger.info(f"Using {len(investment_accounts)} investment accounts from generated data")
-            
-            if investment_accounts:
-                logger.info(f"Fetching market prices for portfolio holdings...")
-                # Use synthetic prices for now
-                # When integrated with your tool with web search, you can:
-                #   1. Fetch real prices using your web_search tool
-                #   2. Pass them as: fetch_real_market_prices(real_prices_dict=your_price_dict)
-                # For now, using synthetic prices; apply Iran/oil shock when in event window
                 real_prices = fetch_real_market_prices()
-                real_prices = apply_iran_oil_price_shock(real_prices, target_date)
-                logger.info(f"Fetched {len(real_prices)} market prices (Iran/oil shock applied if in event window)")
-                
-                logger.info(f"Generating holdings for {len(investment_accounts)} investment accounts...")
-                holdings = generate_portfolio_holdings(investment_accounts, real_prices)
-                logger.info(f"Generated {len(holdings)} portfolio holdings")
-                insert_portfolio_holdings(cursor, holdings)
+            real_prices = apply_iran_oil_price_shock(
+                real_prices, target_date, oil_elevated_override=oil_elevated
+            )
+            logger.info("Fetched %s market prices (oil shock applied=%s)", len(real_prices), oil_elevated)
+            
+            update_existing_holdings_prices(cursor, real_prices, target_date)
+            
+            logger.info("Checking for investment accounts with no holdings...")
+            cursor.execute("SELECT DISTINCT account_id FROM portfolio_holdings")
+            accounts_with_holdings = {row[0] for row in cursor.fetchall()}
+            accounts_without_holdings = [a for a in investment_accounts if a["account_id"] not in accounts_with_holdings]
+            if accounts_without_holdings:
+                logger.info(f"Generating new holdings for {len(accounts_without_holdings)} accounts...")
+                new_holdings = generate_portfolio_holdings(accounts_without_holdings, real_prices, as_of_date=target_date)
+                if new_holdings:
+                    insert_portfolio_holdings(cursor, new_holdings)
             else:
-                logger.info("No investment accounts found, skipping portfolio holdings")
+                logger.info("All investment accounts already have holdings (prices/updated_date refreshed above)")
         else:
-            logger.info("Skipping portfolio holdings (no accounts available)")
+            logger.info("No investment accounts found, skipping portfolio holdings")
         
-        # Keep only the last 365 days of transactions (rolling 1-year window)
+        # Keep only the last 365 days of transactions (rolling 1-year window; use target_date so demo doesn't prune past data)
         logger.info("-" * 60)
         logger.info("Step 4: Pruning transactions to keep only last 365 days...")
+        cutoff = target_date - timedelta(days=364)
         cursor.execute("""
             DELETE FROM transactions 
-            WHERE transaction_date < DATEADD(day, -364, CURRENT_DATE())
-        """)
+            WHERE transaction_date < %s
+        """, (cutoff,))
         deleted = cursor.rowcount
         logger.info(f"✓ Removed {deleted:,} transactions older than 365 days (rolling 1-year window)")
         
@@ -463,5 +572,6 @@ if __name__ == "__main__":
         daily_update()
         # Force process exit so Snowflake connector background threads don't keep the process alive
         sys.exit(0)
-    except Exception:
+    except Exception as e:
+        logger.exception("Daily update failed")
         sys.exit(1)

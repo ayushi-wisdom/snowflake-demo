@@ -58,7 +58,7 @@ def fill_missing_dates():
 
         total_inserted = 0
         for d in missing_dates:
-            count = random.randint(500, 1500)
+            count = random.randint(650, 1000)  # Tighter range to avoid huge weekly spikes
             txns = generate_transactions(accounts, transactions_per_day=count, target_date=d)
             logger.info(f"  {d}: generating {len(txns)} transactions")
             insert_transactions(cursor, txns)

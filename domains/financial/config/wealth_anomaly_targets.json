@@ -1,0 +1,26 @@
+{
+  "iran_shock_date": "2026-03-03",
+  "drift_violation_target": {
+    "min_accounts": 28,
+    "max_accounts": 34,
+    "min_days_since_rebalance": 180
+  },
+  "fee_drag_target": {
+    "min_accounts": 44,
+    "max_accounts": 50
+  },
+  "tlh_eligible_target": {
+    "min_accounts": 16,
+    "max_accounts": 20,
+    "min_total_value": 1100000,
+    "max_total_value": 1300000
+  },
+  "esg_violations_target": {
+    "exact_accounts": 12
+  },
+  "adv003_aum_pct": {
+    "min": 0.32,
+    "max": 0.36
+  },
+  "stale_client_contact_days": 120
+}
